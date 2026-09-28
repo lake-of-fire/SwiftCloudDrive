@@ -44,6 +44,48 @@ final class CloudDriveTests: XCTestCase {
         try await drive.removeFile(at: .root.appending("Direct"))
     }
     
+    func testConfiguredRelativeRootCannotEscapeLocalStorageRoot() async throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cloud-drive-root-\(UUID().uuidString)", isDirectory: true)
+        let outside = base.deletingLastPathComponent()
+            .appendingPathComponent("outside-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: base)
+            try? FileManager.default.removeItem(at: outside)
+        }
+
+        do {
+            _ = try await CloudDrive(
+                storage: .localDirectory(rootURL: base),
+                relativePathToRoot: "../\(outside.lastPathComponent)"
+            )
+            XCTFail("Expected escaping relative root to be rejected")
+        } catch is RootRelativePathError {
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outside.path))
+    }
+
+    func testConfiguredNestedLocalRootRemainsInsideStorageRoot() async throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cloud-drive-nested-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let nested = try await CloudDrive(
+            storage: .localDirectory(rootURL: base),
+            relativePathToRoot: "Books/Japanese"
+        )
+
+        XCTAssertEqual(
+            nested.rootDirectory.standardizedFileURL,
+            base.appendingPathComponent("Books/Japanese", isDirectory: true)
+                .standardizedFileURL
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: nested.rootDirectory.path)
+        )
+    }
+
     func testUploadAndDownload() async throws {
         let data = "Hi".data(using: .utf8)!
         let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent("CloudTempFile")
