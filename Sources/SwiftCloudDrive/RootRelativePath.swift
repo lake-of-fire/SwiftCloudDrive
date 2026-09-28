@@ -58,7 +58,10 @@ public struct RootRelativePath: Hashable, Sendable {
         let requested = path.isEmpty
             ? rootDirURL
             : rootDirURL.appendingPathComponent(path, isDirectory: isDirectory)
-        let resolvedRoot = rootDirURL.standardizedFileURL.resolvingSymlinksInPath()
+        // Resolve both sides by the same rule. The configured root may not
+        // exist yet; resolvingSymlinksInPath alone then leaves a trusted parent
+        // alias unresolved and falsely reports its descendants as escaping.
+        let resolvedRoot = try Self.resolvingExistingAncestor(of: rootDirURL)
         let resolvedRequested = try Self.resolvingExistingAncestor(of: requested)
         guard Self.contains(resolvedRequested, in: resolvedRoot) else {
             throw RootRelativePathError.escapesRoot(resolvedRequested)

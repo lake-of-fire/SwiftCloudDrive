@@ -78,6 +78,7 @@ public final class CloudDrive {
     /// Pass in the type of storage (eg iCloud container), and an optional path relative to the root directory where
     /// the drive will be anchored.
     public init(storage: Storage, relativePathToRoot: String = "") async throws {
+        try Task.checkCancellation()
         self.storage = storage
         self.relativePathToRoot = relativePathToRoot
         
@@ -96,12 +97,15 @@ public final class CloudDrive {
                 throw Error.rootDirectoryURLIsNotDirectory
             }
             let localRoot = URL(fileURLWithPath: rootURL.path, isDirectory: true)
+            // Validate the complete selection before creating any directory.
+            // The root resolver supports absent roots, including trusted aliases.
+            self.rootDirectory = try RootRelativePath(path: relativePathToRoot)
+                .directoryURL(forRoot: localRoot)
+            try Task.checkCancellation()
             try fileManager.createDirectory(
                 at: localRoot,
                 withIntermediateDirectories: true
             )
-            self.rootDirectory = try RootRelativePath(path: relativePathToRoot)
-                .directoryURL(forRoot: localRoot)
             self.metadataMonitor = nil
         }
         

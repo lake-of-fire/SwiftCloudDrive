@@ -73,6 +73,57 @@ final class CloudDriveMonitoringBoundaryTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(predicate.evaluate(with: item("/library/Books/book.epub", downloading: true)))
     }
 
+    func testInvalidSelectionDoesNotCreateMissingBaseDirectory() async throws {
+        let parent = try temporaryDirectory()
+        for selection in ["../outside", "/outside", "Books/../outside", "Books/\u{0}outside"] {
+            let root = parent.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            do {
+                _ = try await CloudDrive(storage: .localDirectory(rootURL: root), relativePathToRoot: selection)
+                XCTFail("Invalid selection was accepted: \(selection)")
+            } catch RootRelativePathError.invalidRelativePath {
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+            XCTAssertTrue(presenters(at: root).isEmpty)
+        }
+    }
+
+    func testCancelledInitializationDoesNotCreateMissingBaseDirectory() async throws {
+        let parent = try temporaryDirectory()
+        let root = parent.appendingPathComponent("not-created", isDirectory: true)
+        let task = Task {
+            while !Task.isCancelled { await Task.yield() }
+            _ = try await CloudDrive(storage: .localDirectory(rootURL: root), relativePathToRoot: "Books")
+        }
+        task.cancel()
+        do {
+            try await task.value
+            XCTFail("Cancelled initialization succeeded")
+        } catch is CancellationError {
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+        XCTAssertTrue(presenters(at: root).isEmpty)
+    }
+
+    func testMissingRootUnderAliasInitializesAndSupportsFileOperations() async throws {
+        let parent = try temporaryDirectory()
+        let physical = parent.appendingPathComponent("physical", isDirectory: true)
+        try FileManager.default.createDirectory(at: physical, withIntermediateDirectories: true)
+        let alias = parent.appendingPathComponent("alias", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: physical)
+        let root = alias.appendingPathComponent("new-library", isDirectory: true)
+        let drive = try await CloudDrive(storage: .localDirectory(rootURL: root), relativePathToRoot: "Books")
+        let selected = root.appendingPathComponent("Books", isDirectory: true)
+        XCTAssertEqual(drive.rootDirectory, selected)
+        XCTAssertEqual(presenters(at: selected).count, 1)
+        let payload = Data("日本語".utf8)
+        let path = RootRelativePath(path: "book.txt")
+        try await drive.writeFile(with: payload, at: path)
+        let actual = try await drive.readFile(at: path)
+        XCTAssertEqual(actual, payload)
+        XCTAssertEqual(try Data(contentsOf: physical.appendingPathComponent("new-library/Books/book.txt")), payload)
+        withExtendedLifetime(drive) {}
+    }
+
     private func presenters(at root: URL) -> [any NSFilePresenter] {
         NSFileCoordinator.filePresenters.filter {
             $0.presentedItemURL?.absoluteURL.standardizedFileURL == root.absoluteURL.standardizedFileURL
