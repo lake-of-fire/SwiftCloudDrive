@@ -9,6 +9,7 @@ import Foundation
 public enum RootRelativePathError: LocalizedError, Sendable {
     case invalidRelativePath(String)
     case escapesRoot(URL)
+    case unresolvedSymlink(URL)
 
     public var errorDescription: String? {
         switch self {
@@ -16,6 +17,8 @@ public enum RootRelativePathError: LocalizedError, Sendable {
             return "Invalid root-relative path: \(path)"
         case .escapesRoot(let url):
             return "Root-relative path escapes the configured drive root: \(url.path)"
+        case .unresolvedSymlink(let url):
+            return "Root-relative path crosses a symlink whose target cannot be verified: \(url.path)"
         }
     }
 }
@@ -56,7 +59,7 @@ public struct RootRelativePath: Hashable, Sendable {
             ? rootDirURL
             : rootDirURL.appendingPathComponent(path, isDirectory: isDirectory)
         let resolvedRoot = rootDirURL.standardizedFileURL.resolvingSymlinksInPath()
-        let resolvedRequested = requested.standardizedFileURL.resolvingSymlinksInPath()
+        let resolvedRequested = try Self.resolvingExistingAncestor(of: requested)
         guard Self.contains(resolvedRequested, in: resolvedRoot) else {
             throw RootRelativePathError.escapesRoot(resolvedRequested)
         }
@@ -72,6 +75,30 @@ public struct RootRelativePath: Hashable, Sendable {
             where component == "." || component == ".." {
             throw RootRelativePathError.invalidRelativePath(path)
         }
+    }
+
+    private static func resolvingExistingAncestor(of requestedURL: URL) throws -> URL {
+        let fileManager = FileManager.default
+        var cursor = requestedURL.standardizedFileURL
+        var missingComponents: [String] = []
+
+        while !fileManager.fileExists(atPath: cursor.path) {
+            // fileExists follows symlinks, so a dangling link looks missing.
+            // Do not authorize descendants through a target we cannot resolve.
+            if (try? fileManager.destinationOfSymbolicLink(atPath: cursor.path)) != nil {
+                throw RootRelativePathError.unresolvedSymlink(cursor)
+            }
+            let parent = cursor.deletingLastPathComponent()
+            guard parent.path != cursor.path else { break }
+            missingComponents.append(cursor.lastPathComponent)
+            cursor = parent
+        }
+
+        var resolved = cursor.resolvingSymlinksInPath()
+        for component in missingComponents.reversed() {
+            resolved.appendPathComponent(component)
+        }
+        return resolved.standardizedFileURL
     }
 
     private static func contains(_ candidate: URL, in root: URL) -> Bool {
