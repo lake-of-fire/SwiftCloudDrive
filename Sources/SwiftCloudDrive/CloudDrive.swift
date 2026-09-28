@@ -88,15 +88,20 @@ public final class CloudDrive {
             guard let containerURL = fileManager.url(forUbiquityContainerIdentifier: containerIdentifier) else {
                 throw Error.couldNotAccessUbiquityContainer
             }
-            if relativePathToRoot.isEmpty {
-                self.rootDirectory = containerURL
-            } else {
-                self.rootDirectory = containerURL.appendingPathComponent(relativePathToRoot, isDirectory: true)
-            }
+            self.rootDirectory = try RootRelativePath(path: relativePathToRoot)
+                .directoryURL(forRoot: containerURL)
             self.metadataMonitor = MetadataMonitor(rootDirectory: self.rootDirectory)
         case let .localDirectory(rootURL):
-            try fileManager.createDirectory(atPath: rootURL.path, withIntermediateDirectories: true)
-            self.rootDirectory = URL(fileURLWithPath: relativePathToRoot, isDirectory: true, relativeTo: rootURL)
+            guard rootURL.isFileURL else {
+                throw Error.rootDirectoryURLIsNotDirectory
+            }
+            let localRoot = URL(fileURLWithPath: rootURL.path, isDirectory: true)
+            try fileManager.createDirectory(
+                at: localRoot,
+                withIntermediateDirectories: true
+            )
+            self.rootDirectory = try RootRelativePath(path: relativePathToRoot)
+                .directoryURL(forRoot: localRoot)
             self.metadataMonitor = nil
         }
         
