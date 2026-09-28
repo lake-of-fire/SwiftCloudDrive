@@ -8,8 +8,8 @@ import shutil
 import subprocess
 import tempfile
 
-SOURCES = ("CoordinatedAccess.swift", "DirectoryObservationScope.swift")
-TESTS = ("CoordinatedAccessTests.swift", "DirectoryObservationScopeTests.swift")
+SOURCES = ("CoordinatedAccess.swift", "DirectoryObservationScope.swift", "RootRelativePath.swift", "Errors.swift")
+TESTS = ("CoordinatedAccessTests.swift", "DirectoryObservationScopeTests.swift", "RootRelativePathTests.swift")
 
 
 def main() -> None:
