@@ -68,6 +68,8 @@ public final class CloudDrive {
 
     private let metadataMonitor: MetadataMonitor?
     private let fileMonitor: FileMonitor
+    // The registration must not be owned by the presenter retained by Foundation.
+    private var fileMonitorRegistration: FileMonitorRegistration?
     public let rootDirectory: URL
     
     
@@ -80,29 +82,26 @@ public final class CloudDrive {
         self.relativePathToRoot = relativePathToRoot
         
         let fileManager = FileManager.default
-        let rootDir: URL
         switch storage {
         case let .iCloudContainer(containerIdentifier):
             guard fileManager.ubiquityIdentityToken != nil else { throw Error.notSignedIntoCloud }
             guard let containerURL = fileManager.url(forUbiquityContainerIdentifier: containerIdentifier) else {
                 throw Error.couldNotAccessUbiquityContainer
             }
-            rootDir = containerURL
             if relativePathToRoot.isEmpty {
                 self.rootDirectory = containerURL
             } else {
                 self.rootDirectory = containerURL.appendingPathComponent(relativePathToRoot, isDirectory: true)
             }
-            self.metadataMonitor = MetadataMonitor(rootDirectory: containerURL)
+            self.metadataMonitor = MetadataMonitor(rootDirectory: self.rootDirectory)
         case let .localDirectory(rootURL):
-            rootDir = rootURL
             try fileManager.createDirectory(atPath: rootURL.path, withIntermediateDirectories: true)
             self.rootDirectory = URL(fileURLWithPath: relativePathToRoot, isDirectory: true, relativeTo: rootURL)
             self.metadataMonitor = nil
         }
         
         // Use the FileMonitor even for non-ubiquitious files
-        let monitor = FileMonitor(rootDirectory: rootDir)
+        let monitor = FileMonitor(rootDirectory: self.rootDirectory)
         self.fileMonitor = monitor
         monitor.changeHandler = { [weak self] changedPaths in
             guard let self, let observer = self.observer else { return }
@@ -127,8 +126,9 @@ public final class CloudDrive {
 
     private func performInitialSetup() async throws {
         try await setupRootDirectory()
-        metadataMonitor?.startMonitoringMetadata()
-        fileMonitor.startMonitoring()
+        await metadataMonitor?.startMonitoringMetadata()
+        try Task.checkCancellation()
+        fileMonitorRegistration = fileMonitor.startMonitoring()
     }
     
     private func setupRootDirectory() async throws {
