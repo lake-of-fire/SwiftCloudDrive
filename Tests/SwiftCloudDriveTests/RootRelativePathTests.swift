@@ -76,6 +76,26 @@ final class RootRelativePathTests: XCTestCase {
         )
     }
 
+    func testDanglingSymlinkAncestorIsRejected() throws {
+        let root = try fixture()
+        let link = root.appendingPathComponent("Books")
+        let missingTarget = root.deletingLastPathComponent()
+            .appendingPathComponent("missing-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(
+            at: link,
+            withDestinationURL: missingTarget
+        )
+
+        XCTAssertThrowsError(
+            try RootRelativePath(path: "Books/book.epub").fileURL(forRoot: root)
+        ) { error in
+            guard case RootRelativePathError.unresolvedSymlink = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missingTarget.path))
+    }
+
     func testSymlinkAncestorResolvingInsideRootRemainsUsable() throws {
         let root = try fixture()
         let real = root.appendingPathComponent("RealBooks", isDirectory: true)
