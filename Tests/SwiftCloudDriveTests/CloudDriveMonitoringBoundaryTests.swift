@@ -3,7 +3,41 @@ import XCTest
 @testable import SwiftCloudDrive
 
 /// Native Foundation tests: not part of the Linux boundary-helper runner.
+private final class CloudDriveOwningObserver: CloudDriveObserver {
+    var drive: CloudDrive?
+
+    func cloudDriveDidChange(
+        _ cloudDrive: CloudDrive,
+        rootRelativePaths: [RootRelativePath]
+    ) {}
+}
+
 final class CloudDriveMonitoringBoundaryTests: XCTestCase, @unchecked Sendable {
+    func testObserverDoesNotCreateOwnerDriveRetainCycle() async throws {
+        let root = try temporaryDirectory()
+        var owner: CloudDriveOwningObserver? = CloudDriveOwningObserver()
+        owner?.drive = try await CloudDrive(
+            storage: .localDirectory(rootURL: root),
+            relativePathToRoot: "Books"
+        )
+        owner?.drive?.observer = owner
+
+        weak var weakOwner = owner
+        weak var weakDrive = owner?.drive
+        let selectedRoot = try XCTUnwrap(owner?.drive?.rootDirectory)
+            .absoluteURL.standardizedFileURL
+        XCTAssertEqual(presenters(at: selectedRoot).count, 1)
+
+        owner = nil
+
+        XCTAssertNil(weakOwner)
+        XCTAssertNil(weakDrive)
+        XCTAssertTrue(
+            presenters(at: selectedRoot).isEmpty,
+            "Releasing a Reader-style owner must also release its drive presenter"
+        )
+    }
+
     func testDriveOwnsPresenterRegistrationAndUnregistersOnRelease() async throws {
         let root = try temporaryDirectory()
         var drive: CloudDrive? = try await CloudDrive(storage: .localDirectory(rootURL: root))
