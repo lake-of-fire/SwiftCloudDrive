@@ -1,0 +1,24 @@
+name: Native macOS qualification
+
+on:
+  push:
+    branches:
+      - fix/coordinated-file-lifetimes-20260928
+  pull_request:
+
+concurrency:
+  group: swift-cloud-drive-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Debug tests
+        run: swift test --configuration debug
+      - name: Release tests
+        run: swift test --configuration release

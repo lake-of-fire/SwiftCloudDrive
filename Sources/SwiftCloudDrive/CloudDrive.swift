@@ -1,7 +1,7 @@
 import Foundation
 import os
 
-public protocol CloudDriveObserver {
+public protocol CloudDriveObserver: AnyObject {
     /// Called when the status of files changes in the drive
     func cloudDriveDidChange(_ cloudDrive: CloudDrive, rootRelativePaths: [RootRelativePath])
 }
@@ -48,8 +48,12 @@ public final class CloudDrive {
     /// The path of the directory for this drive, relative to the root of the drive
     public let relativePathToRoot: String
     
-    /// Set this to receive notification of changes in the cloud drive. 
-    public var observer: CloudDriveObserver?
+    /// Set this to receive notification of changes in the cloud drive.
+    ///
+    /// The drive must not own its observer: Reader-style owners retain their
+    /// drive, so a strong delegate reference would form an owner ↔ drive cycle
+    /// and keep the file presenter registered after the owner is released.
+    public weak var observer: (any CloudDriveObserver)?
     
     /// Optional conflict resolution. If not set, the most recent version wins, and others
     /// are deleted.
@@ -68,6 +72,8 @@ public final class CloudDrive {
 
     private let metadataMonitor: MetadataMonitor?
     private let fileMonitor: FileMonitor
+    // The registration must not be owned by the presenter retained by Foundation.
+    private var fileMonitorRegistration: FileMonitorRegistration?
     public let rootDirectory: URL
     
     
@@ -76,33 +82,39 @@ public final class CloudDrive {
     /// Pass in the type of storage (eg iCloud container), and an optional path relative to the root directory where
     /// the drive will be anchored.
     public init(storage: Storage, relativePathToRoot: String = "") async throws {
+        try Task.checkCancellation()
         self.storage = storage
         self.relativePathToRoot = relativePathToRoot
         
         let fileManager = FileManager.default
-        let rootDir: URL
         switch storage {
         case let .iCloudContainer(containerIdentifier):
             guard fileManager.ubiquityIdentityToken != nil else { throw Error.notSignedIntoCloud }
             guard let containerURL = fileManager.url(forUbiquityContainerIdentifier: containerIdentifier) else {
                 throw Error.couldNotAccessUbiquityContainer
             }
-            rootDir = containerURL
-            if relativePathToRoot.isEmpty {
-                self.rootDirectory = containerURL
-            } else {
-                self.rootDirectory = containerURL.appendingPathComponent(relativePathToRoot, isDirectory: true)
-            }
-            self.metadataMonitor = MetadataMonitor(rootDirectory: containerURL)
+            self.rootDirectory = try RootRelativePath(path: relativePathToRoot)
+                .directoryURL(forRoot: containerURL)
+            self.metadataMonitor = MetadataMonitor(rootDirectory: self.rootDirectory)
         case let .localDirectory(rootURL):
-            rootDir = rootURL
-            try fileManager.createDirectory(atPath: rootURL.path, withIntermediateDirectories: true)
-            self.rootDirectory = URL(fileURLWithPath: relativePathToRoot, isDirectory: true, relativeTo: rootURL)
+            guard rootURL.isFileURL else {
+                throw Error.rootDirectoryURLIsNotDirectory
+            }
+            let localRoot = URL(fileURLWithPath: rootURL.path, isDirectory: true)
+            // Validate the complete selection before creating any directory.
+            // The root resolver supports absent roots, including trusted aliases.
+            self.rootDirectory = try RootRelativePath(path: relativePathToRoot)
+                .directoryURL(forRoot: localRoot)
+            try Task.checkCancellation()
+            try fileManager.createDirectory(
+                at: localRoot,
+                withIntermediateDirectories: true
+            )
             self.metadataMonitor = nil
         }
         
         // Use the FileMonitor even for non-ubiquitious files
-        let monitor = FileMonitor(rootDirectory: rootDir)
+        let monitor = FileMonitor(rootDirectory: self.rootDirectory)
         self.fileMonitor = monitor
         monitor.changeHandler = { [weak self] changedPaths in
             guard let self, let observer = self.observer else { return }
@@ -127,8 +139,9 @@ public final class CloudDrive {
 
     private func performInitialSetup() async throws {
         try await setupRootDirectory()
-        metadataMonitor?.startMonitoringMetadata()
-        fileMonitor.startMonitoring()
+        await metadataMonitor?.startMonitoringMetadata()
+        try Task.checkCancellation()
+        fileMonitorRegistration = fileMonitor.startMonitoring()
     }
     
     private func setupRootDirectory() async throws {

@@ -1,6 +1,5 @@
 //
 //  File.swift
-//  
 //
 //  Created by Drew McCormack on 17/04/2024.
 //
@@ -8,17 +7,32 @@
 import Foundation
 import os
 
-/// Monitors changes to files using file presenter. Used to notifiy of changes
-/// from remote devices.
+/// Registration belongs to CloudDrive, not to the presenter. Foundation retains
+/// registered presenters, so a presenter's own deinit cannot unregister itself.
+final class FileMonitorRegistration {
+    private let presenter: FileMonitor
+
+    init(_ presenter: FileMonitor) {
+        self.presenter = presenter
+        NSFileCoordinator.addFilePresenter(presenter)
+    }
+
+    deinit {
+        NSFileCoordinator.removeFilePresenter(presenter)
+    }
+}
+
+/// Monitors changes to files using file presenter, including remote changes.
 class FileMonitor: NSObject, NSFilePresenter, @unchecked Sendable {
     let rootDirectory: URL
+    private let scope: DirectoryObservationScope
     var presentedItemURL: URL? { rootDirectory }
 
-    /// Called when any file changes, is added, or removed
-    var changeHandler: (([RootRelativePath])->Void)?
-    
-    /// Returns true if resolved. If it returns false, or is nil, the default resolution is applied
-    var conflictHandler: ((RootRelativePath)->Bool)?
+    /// Called when any file changes, is added, or removed.
+    var changeHandler: (([RootRelativePath]) -> Void)?
+
+    /// Returns true if resolved; otherwise the default resolution is applied.
+    var conflictHandler: ((RootRelativePath) -> Bool)?
 
     lazy var presentedItemOperationQueue: OperationQueue = {
         let queue = OperationQueue()
@@ -26,62 +40,63 @@ class FileMonitor: NSObject, NSFilePresenter, @unchecked Sendable {
         queue.qualityOfService = .userInitiated
         return queue
     }()
-    
+
     init(rootDirectory: URL) {
-        self.rootDirectory = rootDirectory
-    }
-    
-    deinit {
-        NSFileCoordinator.removeFilePresenter(self)
-    }
-    
-    /// This needs to be called when the monitor is fully setup
-    func startMonitoring() {
-        NSFileCoordinator.addFilePresenter(self)
-    }
-    
-    func presentedSubitemDidAppear(at url: URL) {
-        informOfChange(at: url)
-    }
-    
-    func presentedSubitemDidChange(at url: URL) {
-        informOfChange(at: url)
+        let scope = DirectoryObservationScope(rootDirectory: rootDirectory)
+        self.scope = scope
+        self.rootDirectory = scope.rootDirectory
     }
 
-    /// Should not really be needed, but there is some suggestion that deletions
-    /// may be the same as moving to the trash, so we treat this as a deletion.
-    func presentedSubitem(at oldURL: URL, didMoveTo newURL: URL) {
-        informOfChange(at: oldURL)
+    /// The owner must retain the returned registration for its monitoring lifetime.
+    func startMonitoring() -> FileMonitorRegistration {
+        FileMonitorRegistration(self)
     }
-    
+
+    func presentedSubitemDidAppear(at url: URL) {
+        informOfChanges(at: [url])
+    }
+
+    func presentedSubitemDidChange(at url: URL) {
+        informOfChanges(at: [url])
+    }
+
+    func presentedItemDidChange() {
+        informOfChanges(at: [rootDirectory])
+    }
+
+    func presentedSubitem(at oldURL: URL, didMoveTo newURL: URL) {
+        // A move within the scope invalidates both names. A move across its
+        // boundary reports only the side that belongs to this drive.
+        informOfChanges(at: [oldURL, newURL])
+    }
+
     func presentedItemDidGain(_ version: NSFileVersion) {
         do {
             if version.isConflict {
                 try resolveConflicts(for: version.url)
             }
-            informOfChange(at: version.url)
+            informOfChanges(at: [version.url])
         } catch {
             os_log("Failed to handle cloud metadata")
         }
     }
-    
-    private func relativePath(for url: URL) -> RootRelativePath {
-        let rootLength = rootDirectory.resolvingSymlinksInPath().standardized.path.count
-        let path = String(url.resolvingSymlinksInPath().standardized.path.dropFirst(rootLength))
-        let rootRelativePath = RootRelativePath(path: path)
-        return rootRelativePath
+
+    private func informOfChanges(at urls: [URL]) {
+        var seen = Set<String>()
+        let paths = urls.compactMap { url -> RootRelativePath? in
+            guard let path = scope.relativePath(for: url),
+                  seen.insert(path).inserted else { return nil }
+            return RootRelativePath(path: path)
+        }
+        guard !paths.isEmpty else { return }
+        changeHandler?(paths)
     }
-    
-    private func informOfChange(at url: URL) {
-        let rootRelativePath = relativePath(for: url)
-        changeHandler?([rootRelativePath])
-    }
-    
+
     private func resolveConflicts(for url: URL) throws {
-        let rootRelativePath = relativePath(for: url)
-        let resolved = conflictHandler?(rootRelativePath) ?? false
+        guard let path = scope.relativePath(for: url) else { return }
+        let resolved = conflictHandler?(RootRelativePath(path: path)) ?? false
         guard !resolved else { return }
-        
+
         let coordinator = NSFileCoordinator(filePresenter: self)
         var coordinatorError: NSError?
         var versionError: Swift.Error?
@@ -92,12 +107,11 @@ class FileMonitor: NSObject, NSFilePresenter, @unchecked Sendable {
                 versionError = error
             }
         }
-        
-        guard versionError == nil else { throw versionError! }
-        guard coordinatorError == nil else { throw Error.foundationError(coordinatorError!) }
-        
+
+        if let versionError { throw versionError }
+        if let coordinatorError { throw Error.foundationError(coordinatorError) }
+
         let conflictVersions = NSFileVersion.unresolvedConflictVersionsOfItem(at: url)
         conflictVersions?.forEach { $0.isResolved = true }
     }
 }
-
