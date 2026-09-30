@@ -1,7 +1,7 @@
 import Foundation
 import os
 
-public protocol CloudDriveObserver {
+public protocol CloudDriveObserver: AnyObject {
     /// Called when the status of files changes in the drive
     func cloudDriveDidChange(_ cloudDrive: CloudDrive, rootRelativePaths: [RootRelativePath])
 }
@@ -48,8 +48,12 @@ public final class CloudDrive {
     /// The path of the directory for this drive, relative to the root of the drive
     public let relativePathToRoot: String
     
-    /// Set this to receive notification of changes in the cloud drive. 
-    public var observer: CloudDriveObserver?
+    /// Set this to receive notification of changes in the cloud drive.
+    ///
+    /// The drive must not own its observer: Reader-style owners retain their
+    /// drive, so a strong delegate reference would form an owner ↔ drive cycle
+    /// and keep the file presenter registered after the owner is released.
+    public weak var observer: (any CloudDriveObserver)?
     
     /// Optional conflict resolution. If not set, the most recent version wins, and others
     /// are deleted.
