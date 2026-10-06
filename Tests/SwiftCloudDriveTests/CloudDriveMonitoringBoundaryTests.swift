@@ -158,6 +158,88 @@ final class CloudDriveMonitoringBoundaryTests: XCTestCase, @unchecked Sendable {
         withExtendedLifetime(drive) {}
     }
 
+    private enum RemovalAdmissionError: Swift.Error { case obsolete }
+
+    private func checkGuardedRemoval(isDirectory: Bool, reject: Bool) async throws {
+        let root = try temporaryDirectory()
+        let drive = try await CloudDrive(storage: .localDirectory(rootURL: root))
+        let path = RootRelativePath(path: "selected")
+        let target = root.appendingPathComponent("selected", isDirectory: isDirectory)
+        let payload = isDirectory ? target.appendingPathComponent("book.txt") : target
+        if isDirectory {
+            try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        }
+        try Data("keep".utf8).write(to: payload)
+        var admissions = 0
+        do {
+            try drive.removeItemSynchronously(at: path, isDirectory: isDirectory) {
+                admissions += 1
+                XCTAssertTrue(FileManager.default.fileExists(atPath: payload.path))
+                if reject { throw RemovalAdmissionError.obsolete }
+            }
+            XCTAssertFalse(reject, "Obsolete admission must throw")
+        } catch RemovalAdmissionError.obsolete {
+            XCTAssertTrue(reject)
+        }
+        XCTAssertEqual(admissions, 1)
+        if reject {
+            XCTAssertEqual(try Data(contentsOf: payload), Data("keep".utf8))
+        } else {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+        }
+    }
+
+    func testGuardedFileRemovalRejectsFinalAdmissionAndPreservesBytes() async throws {
+        try await checkGuardedRemoval(isDirectory: false, reject: true)
+    }
+
+    func testGuardedDirectoryRemovalRejectsFinalAdmissionAndPreservesBytes() async throws {
+        try await checkGuardedRemoval(isDirectory: true, reject: true)
+    }
+
+    func testGuardedFileRemovalCommitsCurrentAdmission() async throws {
+        try await checkGuardedRemoval(isDirectory: false, reject: false)
+    }
+
+    func testGuardedDirectoryRemovalCommitsCurrentAdmission() async throws {
+        try await checkGuardedRemoval(isDirectory: true, reject: false)
+    }
+
+    func testGuardedRemovalCancelledAtAccessorPreservesBytes() async throws {
+        let root = try temporaryDirectory()
+        let target = root.appendingPathComponent("book.txt")
+        try Data("keep".utf8).write(to: target)
+        let task = Task {
+            let selectedDrive = try await CloudDrive(storage: .localDirectory(rootURL: root))
+            try selectedDrive.removeItemSynchronously(at: RootRelativePath(path: "book.txt"), isDirectory: false) {
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+        }
+        do { try await task.value; XCTFail("Expected accessor cancellation") }
+        catch is CancellationError { }
+        XCTAssertEqual(try Data(contentsOf: target), Data("keep".utf8))
+    }
+
+    func testGuardedRemovalCancellationAfterCommitRemainsSuccess() async throws {
+        let root = try temporaryDirectory()
+        let target = root.appendingPathComponent("book.txt")
+        try Data("remove".utf8).write(to: target)
+        let task = Task {
+            let drive = try await CloudDrive(storage: .localDirectory(rootURL: root))
+            try CoordinatedRemovalObservation.$didRemove.withValue({
+                withUnsafeCurrentTask { $0?.cancel() }
+            }) {
+                try drive.removeItemSynchronously(
+                    at: RootRelativePath(path: "book.txt"), isDirectory: false,
+                    validateAdmission: {}
+                )
+            }
+            XCTAssertTrue(Task.isCancelled)
+        }
+        try await task.value
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+    }
+
     private func presenters(at root: URL) -> [any NSFilePresenter] {
         NSFileCoordinator.filePresenters.filter {
             $0.presentedItemURL?.absoluteURL.standardizedFileURL == root.absoluteURL.standardizedFileURL
