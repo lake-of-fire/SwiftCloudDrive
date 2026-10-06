@@ -211,6 +211,49 @@ public final class CloudDrive {
         return try await coordinatedFileManager.removeItem(coordinatingAccessAt: fileURL)
     }
     
+    /// Removes the selected item without handing its admission callback to another actor.
+    /// Call off the main actor: native coordination can wait for file presenters.
+    /// Admission and type inspection run inside the synchronous `.forDeleting`
+    /// accessor immediately before removal. A throwing callback preserves the item.
+    public func removeItemSynchronously(
+        at path: RootRelativePath,
+        isDirectory: Bool,
+        validateAdmission: () throws -> Void
+    ) throws {
+        guard isConnected else { throw Error.queriedWhileNotConnected }
+        let url = try isDirectory
+            ? path.directoryURL(forRoot: rootDirectory)
+            : path.fileURL(forRoot: rootDirectory)
+        try withoutActuallyEscaping(validateAdmission) { validateAdmission in
+            try CoordinatedAccess.perform(
+                resources: [url],
+                startAccess: { $0.startAccessingSecurityScopedResource() },
+                stopAccess: { $0.stopAccessingSecurityScopedResource() },
+                coordinate: { accessor in
+                    var error: NSError?
+                    NSFileCoordinator(filePresenter: fileMonitor).coordinate(
+                        writingItemAt: url, options: .forDeleting, error: &error,
+                        byAccessor: accessor
+                    )
+                    return error
+                },
+                operation: { coordinatedURL in
+                    try validateAdmission()
+                    // A callback can cancel this task without throwing.
+                    try Task.checkCancellation()
+                    var directory = ObjCBool(false)
+                    guard FileManager.default.fileExists(
+                        atPath: coordinatedURL.path, isDirectory: &directory
+                    ), directory.boolValue == isDirectory else {
+                        throw Error.invalidFileType
+                    }
+                    try FileManager.default.removeItem(at: coordinatedURL)
+                    CoordinatedRemovalObservation.didRemove?()
+                }
+            )
+        }
+    }
+
     /// Copies a file from outside the container, into the container. If there is a file already at the destination
     /// it will give an error and fail.
     public func upload(from fromURL: URL, to path: RootRelativePath) async throws {

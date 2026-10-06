@@ -33,3 +33,9 @@ enum CoordinatedAccess {
         throw CocoaError(.fileReadUnknown)
     }
 }
+
+// Synchronous native-test observation after removal commits. No observer is
+// installed in ordinary use; it cannot move admission into another task.
+enum CoordinatedRemovalObservation {
+    @TaskLocal static var didRemove: (@Sendable () -> Void)?
+}
