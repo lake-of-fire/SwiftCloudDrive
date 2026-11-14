@@ -139,7 +139,6 @@ final class CoordinatedFileRequest: @unchecked Sendable {
 }
 
 /// Executes one synchronous coordinator accessor with balanced resource access.
-/// Native coordination is supplied by CoordinatedFileManager, not simulated here.
 /// Once an accessor commits, cancellation must not turn its success into failure.
 enum CoordinatedAccess {
     static func perform<Input, Output>(
