@@ -92,26 +92,30 @@ class FileMonitor: NSObject, NSFilePresenter, @unchecked Sendable {
         changeHandler?(paths)
     }
 
-    private func resolveConflicts(for url: URL) throws {
+    func resolveConflicts(for url: URL) throws {
         guard let path = scope.relativePath(for: url) else { return }
         let resolved = conflictHandler?(RootRelativePath(path: path)) ?? false
         guard !resolved else { return }
 
-        let coordinator = NSFileCoordinator(filePresenter: self)
-        var coordinatorError: NSError?
-        var versionError: Swift.Error?
-        coordinator.coordinate(writingItemAt: url, options: .forDeleting, error: &coordinatorError) { newURL in
-            do {
-                try NSFileVersion.removeOtherVersionsOfItem(at: newURL)
-            } catch {
-                versionError = error
+        let request = CoordinatedFileRequest(presenter: self)
+        try request.withExecution { checkCancellation in
+            var coordinatorError: NSError?
+            var versionError: Swift.Error?
+            request.coordinator.coordinate(writingItemAt: url, options: .forDeleting, error: &coordinatorError) { newURL in
+                do {
+                    try checkCancellation()
+                    try NSFileVersion.removeOtherVersionsOfItem(at: newURL)
+                } catch {
+                    versionError = error
+                }
             }
+
+            if let versionError { throw versionError }
+            if let coordinatorError { throw Error.foundationError(coordinatorError) }
+
+            try checkCancellation()
+            let conflictVersions = NSFileVersion.unresolvedConflictVersionsOfItem(at: url)
+            conflictVersions?.forEach { $0.isResolved = true }
         }
-
-        if let versionError { throw versionError }
-        if let coordinatorError { throw Error.foundationError(coordinatorError) }
-
-        let conflictVersions = NSFileVersion.unresolvedConflictVersionsOfItem(at: url)
-        conflictVersions?.forEach { $0.isResolved = true }
     }
 }

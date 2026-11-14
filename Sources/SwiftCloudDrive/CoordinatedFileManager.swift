@@ -18,7 +18,7 @@ public actor CoordinatedFileManager {
     }
 
     public func fileExists(coordinatingAccessAt fileURL: URL) async throws -> (exists: Bool, isDirectory: Bool) {
-        try coordinate(readingItemAt: fileURL) { [self] url in
+        try await coordinate(readingItemAt: fileURL) { [self] url in
             var isDir: ObjCBool = false
             let exists = fileManager.fileExists(atPath: url.path, isDirectory: &isDir)
             return (exists, isDir.boolValue)
@@ -26,85 +26,97 @@ public actor CoordinatedFileManager {
     }
 
     public func createDirectory(coordinatingAccessAt dirURL: URL, withIntermediateDirectories: Bool) async throws {
-        try coordinate(writingItemAt: dirURL, options: .forMerging) { [self] url in
+        try await coordinate(writingItemAt: dirURL, options: .forMerging) { [self] url in
             try fileManager.createDirectory(at: url, withIntermediateDirectories: withIntermediateDirectories)
         }
     }
 
     public func removeItem(coordinatingAccessAt dirURL: URL) async throws {
-        try coordinate(writingItemAt: dirURL, options: .forDeleting) { [self] url in
+        try await coordinate(writingItemAt: dirURL, options: .forDeleting) { [self] url in
             try fileManager.removeItem(at: url)
         }
     }
 
     public func copyItem(coordinatingAccessFrom fromURL: URL, to toURL: URL) async throws {
-        try coordinate(readingItemAt: fromURL, writingItemAt: toURL, writeOptions: .forReplacing) { [self] read, write in
+        try await coordinate(readingItemAt: fromURL, writingItemAt: toURL, writeOptions: .forReplacing) { [self] read, write in
             try fileManager.copyItem(at: read, to: write)
         }
     }
 
     public func contentsOfDirectory(coordinatingAccessAt dirURL: URL, includingPropertiesForKeys keys: [URLResourceKey]?, options mask: FileManager.DirectoryEnumerationOptions) async throws -> [URL] {
-        try coordinate(readingItemAt: dirURL) { [self] url in
+        try await coordinate(readingItemAt: dirURL) { [self] url in
             try fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: keys, options: mask)
         }
     }
 
     public func contentsOfFile(coordinatingAccessAt url: URL) async throws -> Data {
-        try coordinate(readingItemAt: url) { try Data(contentsOf: $0) }
+        try await coordinate(readingItemAt: url) { try Data(contentsOf: $0) }
     }
 
     public func write(_ data: Data, coordinatingAccessTo url: URL) async throws {
-        try coordinate(writingItemAt: url) { try data.write(to: $0) }
+        try await coordinate(writingItemAt: url) { try data.write(to: $0) }
     }
 
     public func updateFile(coordinatingAccessTo url: URL, in block: @Sendable @escaping (URL) throws -> Void) async throws {
-        try coordinate(writingItemAt: url, with: block)
+        try await coordinate(writingItemAt: url, with: block)
     }
 
     public func readFile(coordinatingAccessTo url: URL, in block: @Sendable @escaping (URL) throws -> Void) async throws {
-        try coordinate(readingItemAt: url, with: block)
+        try await coordinate(readingItemAt: url, with: block)
     }
 
     private func coordinate<T>(
         readingItemAt url: URL,
         options: NSFileCoordinator.ReadingOptions = [],
         with block: @escaping (URL) throws -> T
-    ) throws -> T {
-        try CoordinatedAccess.perform(
-            resources: [url],
-            startAccess: { $0.startAccessingSecurityScopedResource() },
-            stopAccess: { $0.stopAccessingSecurityScopedResource() },
-            coordinate: { accessor in
-                var error: NSError?
-                NSFileCoordinator(filePresenter: presenter).coordinate(
-                    readingItemAt: url, options: options, error: &error,
-                    byAccessor: accessor
+    ) async throws -> T {
+        let request = CoordinatedFileRequest(presenter: presenter)
+        return try await withTaskCancellationHandler {
+            try request.withExecution { checkCancellation in
+                try CoordinatedAccess.perform(
+                    resources: [url],
+                    startAccess: { $0.startAccessingSecurityScopedResource() },
+                    stopAccess: { $0.stopAccessingSecurityScopedResource() },
+                    coordinate: { accessor in
+                        var error: NSError?
+                        request.coordinator.coordinate(
+                            readingItemAt: url, options: options, error: &error,
+                            byAccessor: accessor
+                        )
+                        return error
+                    },
+                    checkCancellation: checkCancellation,
+                    operation: block
                 )
-                return error
-            },
-            operation: block
-        )
+            }
+        } onCancel: { request.cancel() }
     }
 
     private func coordinate<T>(
         writingItemAt url: URL,
         options: NSFileCoordinator.WritingOptions = [],
         with block: @escaping (URL) throws -> T
-    ) throws -> T {
-        try CoordinatedAccess.perform(
-            resources: [url],
-            startAccess: { $0.startAccessingSecurityScopedResource() },
-            stopAccess: { $0.stopAccessingSecurityScopedResource() },
-            coordinate: { accessor in
-                var error: NSError?
-                NSFileCoordinator(filePresenter: presenter).coordinate(
-                    writingItemAt: url, options: options, error: &error,
-                    byAccessor: accessor
+    ) async throws -> T {
+        let request = CoordinatedFileRequest(presenter: presenter)
+        return try await withTaskCancellationHandler {
+            try request.withExecution { checkCancellation in
+                try CoordinatedAccess.perform(
+                    resources: [url],
+                    startAccess: { $0.startAccessingSecurityScopedResource() },
+                    stopAccess: { $0.stopAccessingSecurityScopedResource() },
+                    coordinate: { accessor in
+                        var error: NSError?
+                        request.coordinator.coordinate(
+                            writingItemAt: url, options: options, error: &error,
+                            byAccessor: accessor
+                        )
+                        return error
+                    },
+                    checkCancellation: checkCancellation,
+                    operation: block
                 )
-                return error
-            },
-            operation: block
-        )
+            }
+        } onCancel: { request.cancel() }
     }
 
     private func coordinate<T>(
@@ -112,20 +124,26 @@ public actor CoordinatedFileManager {
         writingItemAt writeURL: URL,
         writeOptions: NSFileCoordinator.WritingOptions = [],
         with block: @escaping (URL, URL) throws -> T
-    ) throws -> T {
-        try CoordinatedAccess.perform(
-            resources: [readURL, writeURL],
-            startAccess: { $0.startAccessingSecurityScopedResource() },
-            stopAccess: { $0.stopAccessingSecurityScopedResource() },
-            coordinate: { accessor in
-                var error: NSError?
-                NSFileCoordinator(filePresenter: presenter).coordinate(
-                    readingItemAt: readURL, options: [],
-                    writingItemAt: writeURL, options: writeOptions, error: &error
-                ) { read, write in accessor((read, write)) }
-                return error
-            },
-            operation: { try block($0.0, $0.1) }
-        )
+    ) async throws -> T {
+        let request = CoordinatedFileRequest(presenter: presenter)
+        return try await withTaskCancellationHandler {
+            try request.withExecution { checkCancellation in
+                try CoordinatedAccess.perform(
+                    resources: [readURL, writeURL],
+                    startAccess: { $0.startAccessingSecurityScopedResource() },
+                    stopAccess: { $0.stopAccessingSecurityScopedResource() },
+                    coordinate: { accessor in
+                        var error: NSError?
+                        request.coordinator.coordinate(
+                            readingItemAt: readURL, options: [],
+                            writingItemAt: writeURL, options: writeOptions, error: &error
+                        ) { read, write in accessor((read, write)) }
+                        return error
+                    },
+                    checkCancellation: checkCancellation,
+                    operation: { try block($0.0, $0.1) }
+                )
+            }
+        } onCancel: { request.cancel() }
     }
 }
