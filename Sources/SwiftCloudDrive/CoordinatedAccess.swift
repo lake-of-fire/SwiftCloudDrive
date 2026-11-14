@@ -44,7 +44,7 @@ public enum CoordinatedFileExecutionProtection {
 /// NSFileCoordinator permits cancellation from another thread. Accessor state
 /// stays on its calling thread; this carrier transfers only the cancel handle.
 final class CoordinatedFileRequest: @unchecked Sendable {
-    let coordinator: NSFileCoordinator
+    private let coordinator: NSFileCoordinator
 
     init(presenter: (any NSFilePresenter)?) {
         coordinator = NSFileCoordinator(filePresenter: presenter)
@@ -52,8 +52,10 @@ final class CoordinatedFileRequest: @unchecked Sendable {
 
     func cancel() { coordinator.cancel() }
 
+    /// Execution may also cover metadata work after a native accessor returns.
+    /// Keep the access value within this synchronous callback.
     func withExecution<Value>(
-        _ operation: (_ checkCancellation: @escaping () throws -> Void) throws -> Value
+        _ operation: (Access) throws -> Value
     ) throws -> Value {
         try Task.checkCancellation()
         let execution = try CoordinatedFileExecutionProtection.acquire()
@@ -64,7 +66,75 @@ final class CoordinatedFileRequest: @unchecked Sendable {
             try execution?.checkpoint()
         }
         try checkCancellation()
-        return try operation(checkCancellation)
+        return try operation(Access(coordinator: coordinator, checkCancellation: checkCancellation))
+    }
+
+    /// Confined to the synchronous execution scope. Native access and resource
+    /// cleanup share one implementation across actor and presenter callers.
+    struct Access {
+        private let coordinator: NSFileCoordinator
+        let checkCancellation: () throws -> Void
+
+        fileprivate init(coordinator: NSFileCoordinator, checkCancellation: @escaping () throws -> Void) {
+            self.coordinator = coordinator
+            self.checkCancellation = checkCancellation
+        }
+
+        func read<Value>(
+            at url: URL,
+            options: NSFileCoordinator.ReadingOptions = [],
+            _ operation: @escaping (URL) throws -> Value
+        ) throws -> Value {
+            try CoordinatedAccess.perform(
+                resources: [url],
+                coordinate: { accessor in
+                    var error: NSError?
+                    coordinator.coordinate(readingItemAt: url, options: options,
+                                           error: &error, byAccessor: accessor)
+                    return error
+                },
+                checkCancellation: checkCancellation,
+                operation: operation
+            )
+        }
+
+        func write<Value>(
+            at url: URL,
+            options: NSFileCoordinator.WritingOptions = [],
+            _ operation: @escaping (URL) throws -> Value
+        ) throws -> Value {
+            try CoordinatedAccess.perform(
+                resources: [url],
+                coordinate: { accessor in
+                    var error: NSError?
+                    coordinator.coordinate(writingItemAt: url, options: options,
+                                           error: &error, byAccessor: accessor)
+                    return error
+                },
+                checkCancellation: checkCancellation,
+                operation: operation
+            )
+        }
+
+        func read<Value>(
+            at readURL: URL,
+            writingAt writeURL: URL,
+            writeOptions: NSFileCoordinator.WritingOptions = [],
+            _ operation: @escaping (URL, URL) throws -> Value
+        ) throws -> Value {
+            try CoordinatedAccess.perform(
+                resources: [readURL, writeURL],
+                coordinate: { accessor in
+                    var error: NSError?
+                    coordinator.coordinate(readingItemAt: readURL, options: [],
+                                           writingItemAt: writeURL, options: writeOptions,
+                                           error: &error) { accessor(($0, $1)) }
+                    return error
+                },
+                checkCancellation: checkCancellation,
+                operation: { try operation($0.0, $0.1) }
+            )
+        }
     }
 }
 
@@ -74,8 +144,8 @@ final class CoordinatedFileRequest: @unchecked Sendable {
 enum CoordinatedAccess {
     static func perform<Input, Output>(
         resources: [URL],
-        startAccess: (URL) -> Bool,
-        stopAccess: (URL) -> Void,
+        startAccess: (URL) -> Bool = { $0.startAccessingSecurityScopedResource() },
+        stopAccess: (URL) -> Void = { $0.stopAccessingSecurityScopedResource() },
         coordinate: (_ accessor: @escaping (Input) -> Void) -> NSError?,
         checkCancellation: @escaping () throws -> Void = { try Task.checkCancellation() },
         operation: @escaping (Input) throws -> Output

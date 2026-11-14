@@ -104,27 +104,15 @@ class FileMonitor: NSObject, NSFilePresenter, @unchecked Sendable {
         guard !resolved else { return }
 
         let request = CoordinatedFileRequest(presenter: self)
-        try request.withExecution { checkCancellation in
-            try CoordinatedAccess.perform(
-                resources: [url],
-                startAccess: { $0.startAccessingSecurityScopedResource() },
-                stopAccess: { $0.stopAccessingSecurityScopedResource() },
-                coordinate: { accessor in
-                    var error: NSError?
-                    request.coordinator.coordinate(
-                        writingItemAt: url, options: .forDeleting, error: &error,
-                        byAccessor: accessor
-                    )
-                    return error
-                },
-                checkCancellation: checkCancellation,
-                operation: { try NSFileVersion.removeOtherVersionsOfItem(at: $0) }
-            )
+        try request.withExecution { access in
+            try access.write(at: url, options: .forDeleting) {
+                try NSFileVersion.removeOtherVersionsOfItem(at: $0)
+            }
 
-            try checkCancellation()
+            try access.checkCancellation()
             let conflictVersions = NSFileVersion.unresolvedConflictVersionsOfItem(at: url)
             for version in conflictVersions ?? [] {
-                try checkCancellation()
+                try access.checkCancellation()
                 version.isResolved = true
             }
         }
