@@ -98,6 +98,10 @@ enum CoordinatedAccess {
         // The accessor is synchronous. Resolve once, after native coordination
         // has returned, rather than resuming a continuation from two paths.
         if let result { return try result.get() }
+        // Cancellation can prevent native coordination from calling the
+        // accessor at all. Preserve that retryable outcome instead of exposing
+        // a generic Foundation error to lifecycle/admission callers.
+        try checkCancellation()
         if let coordinatorError { throw coordinatorError }
         throw CocoaError(.fileReadUnknown)
     }
