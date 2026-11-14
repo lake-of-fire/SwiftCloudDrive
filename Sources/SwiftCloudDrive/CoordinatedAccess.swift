@@ -109,6 +109,8 @@ enum CoordinatedAccess {
 
 // Synchronous native-test observation after removal commits. No observer is
 // installed in ordinary use; it cannot move admission into another task.
+#if DEBUG
 enum CoordinatedRemovalObservation {
     @TaskLocal static var didRemove: (@Sendable () -> Void)?
 }
+#endif

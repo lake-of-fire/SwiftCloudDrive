@@ -13,6 +13,35 @@ private final class CloudDriveOwningObserver: CloudDriveObserver {
 }
 
 final class CloudDriveMonitoringBoundaryTests: XCTestCase, @unchecked Sendable {
+    func testGuardedRemovalRequiresHostExecutionBeforeValidation() async throws {
+        let root = try temporaryDirectory()
+        let drive = try await CloudDrive(storage: .localDirectory(rootURL: root))
+        let target = root.appendingPathComponent("book.txt")
+        let original = Data("keep".utf8)
+        try original.write(to: target)
+        XCTAssertThrowsError(try CoordinatedFileExecutionProtection.$synchronousAcquisition.withValue({
+            throw CancellationError()
+        }) {
+            try drive.removeItemSynchronously(at: RootRelativePath(path: "book.txt"), isDirectory: false) {
+                XCTFail("Denied execution cannot enter removal validation")
+            }
+        }) { XCTAssertTrue($0 is CancellationError) }
+        XCTAssertEqual(try Data(contentsOf: target), original)
+    }
+
+    func testVersionGainStillInvalidatesWhenConflictExecutionIsDenied() throws {
+        let root = try temporaryDirectory()
+        let monitor = FileMonitor(rootDirectory: root)
+        var changes: [[String]] = []
+        monitor.changeHandler = { changes.append($0.map(\.path)) }
+        CoordinatedFileExecutionProtection.$synchronousAcquisition.withValue({
+            throw CancellationError()
+        }) {
+            monitor.presentedItemDidGain(at: root.appendingPathComponent("book.epub"), isConflict: true)
+        }
+        XCTAssertEqual(changes, [["book.epub"]])
+    }
+
     func testObserverDoesNotCreateOwnerDriveRetainCycle() async throws {
         let root = try temporaryDirectory()
         var owner: CloudDriveOwningObserver? = CloudDriveOwningObserver()
@@ -220,6 +249,7 @@ final class CloudDriveMonitoringBoundaryTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try Data(contentsOf: target), Data("keep".utf8))
     }
 
+#if DEBUG
     func testGuardedRemovalCancellationAfterCommitRemainsSuccess() async throws {
         let root = try temporaryDirectory()
         let target = root.appendingPathComponent("book.txt")
@@ -239,6 +269,7 @@ final class CloudDriveMonitoringBoundaryTests: XCTestCase, @unchecked Sendable {
         try await task.value
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
     }
+#endif
 
     private func presenters(at root: URL) -> [any NSFilePresenter] {
         NSFileCoordinator.filePresenters.filter {

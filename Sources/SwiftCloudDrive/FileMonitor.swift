@@ -71,11 +71,17 @@ class FileMonitor: NSObject, NSFilePresenter, @unchecked Sendable {
     }
 
     func presentedItemDidGain(_ version: NSFileVersion) {
+        presentedItemDidGain(at: version.url, isConflict: version.isConflict)
+    }
+
+    /// A version change remains an invalidation even when cleanup is deferred
+    /// by execution admission. Consumers must still observe the changed item.
+    func presentedItemDidGain(at url: URL, isConflict: Bool) {
+        defer { informOfChanges(at: [url]) }
         do {
-            if version.isConflict {
-                try resolveConflicts(for: version.url)
+            if isConflict {
+                try resolveConflicts(for: url)
             }
-            informOfChanges(at: [version.url])
         } catch {
             os_log("Failed to handle cloud metadata")
         }
@@ -99,23 +105,28 @@ class FileMonitor: NSObject, NSFilePresenter, @unchecked Sendable {
 
         let request = CoordinatedFileRequest(presenter: self)
         try request.withExecution { checkCancellation in
-            var coordinatorError: NSError?
-            var versionError: Swift.Error?
-            request.coordinator.coordinate(writingItemAt: url, options: .forDeleting, error: &coordinatorError) { newURL in
-                do {
-                    try checkCancellation()
-                    try NSFileVersion.removeOtherVersionsOfItem(at: newURL)
-                } catch {
-                    versionError = error
-                }
-            }
-
-            if let versionError { throw versionError }
-            if let coordinatorError { throw Error.foundationError(coordinatorError) }
+            try CoordinatedAccess.perform(
+                resources: [url],
+                startAccess: { $0.startAccessingSecurityScopedResource() },
+                stopAccess: { $0.stopAccessingSecurityScopedResource() },
+                coordinate: { accessor in
+                    var error: NSError?
+                    request.coordinator.coordinate(
+                        writingItemAt: url, options: .forDeleting, error: &error,
+                        byAccessor: accessor
+                    )
+                    return error
+                },
+                checkCancellation: checkCancellation,
+                operation: { try NSFileVersion.removeOtherVersionsOfItem(at: $0) }
+            )
 
             try checkCancellation()
             let conflictVersions = NSFileVersion.unresolvedConflictVersionsOfItem(at: url)
-            conflictVersions?.forEach { $0.isResolved = true }
+            for version in conflictVersions ?? [] {
+                try checkCancellation()
+                version.isResolved = true
+            }
         }
     }
 }

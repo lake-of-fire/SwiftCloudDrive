@@ -224,33 +224,41 @@ public final class CloudDrive {
         let url = try isDirectory
             ? path.directoryURL(forRoot: rootDirectory)
             : path.fileURL(forRoot: rootDirectory)
-        try withoutActuallyEscaping(validateAdmission) { validateAdmission in
-            try CoordinatedAccess.perform(
-                resources: [url],
-                startAccess: { $0.startAccessingSecurityScopedResource() },
-                stopAccess: { $0.stopAccessingSecurityScopedResource() },
-                coordinate: { accessor in
-                    var error: NSError?
-                    NSFileCoordinator(filePresenter: fileMonitor).coordinate(
-                        writingItemAt: url, options: .forDeleting, error: &error,
-                        byAccessor: accessor
-                    )
-                    return error
-                },
-                operation: { coordinatedURL in
-                    try validateAdmission()
-                    // A callback can cancel this task without throwing.
-                    try Task.checkCancellation()
-                    var directory = ObjCBool(false)
-                    guard FileManager.default.fileExists(
-                        atPath: coordinatedURL.path, isDirectory: &directory
-                    ), directory.boolValue == isDirectory else {
-                        throw Error.invalidFileType
+        let request = CoordinatedFileRequest(presenter: fileMonitor)
+        try request.withExecution { checkCancellation in
+            try withoutActuallyEscaping(validateAdmission) { validateAdmission in
+                try CoordinatedAccess.perform(
+                    resources: [url],
+                    startAccess: { $0.startAccessingSecurityScopedResource() },
+                    stopAccess: { $0.stopAccessingSecurityScopedResource() },
+                    coordinate: { accessor in
+                        var error: NSError?
+                        request.coordinator.coordinate(
+                            writingItemAt: url, options: .forDeleting, error: &error,
+                            byAccessor: accessor
+                        )
+                        return error
+                    },
+                    checkCancellation: checkCancellation,
+                    operation: { coordinatedURL in
+                        try validateAdmission()
+                        // Validation can request cancellation or outlive the
+                        // execution lease without itself throwing.
+                        try checkCancellation()
+                        var directory = ObjCBool(false)
+                        guard FileManager.default.fileExists(
+                            atPath: coordinatedURL.path, isDirectory: &directory
+                        ), directory.boolValue == isDirectory else {
+                            throw Error.invalidFileType
+                        }
+                        try checkCancellation()
+                        try FileManager.default.removeItem(at: coordinatedURL)
+#if DEBUG
+                        CoordinatedRemovalObservation.didRemove?()
+#endif
                     }
-                    try FileManager.default.removeItem(at: coordinatedURL)
-                    CoordinatedRemovalObservation.didRemove?()
-                }
-            )
+                )
+            }
         }
     }
 
