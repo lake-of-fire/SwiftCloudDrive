@@ -168,4 +168,18 @@ final class CoordinatedAccessTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(result, "committed")
         XCTAssertEqual(try Data(contentsOf: url), Data("committed".utf8))
     }
+
+    func testCancellationWithoutNativeAccessorPreservesCancellationReason() async {
+        let task = Task {
+            try CoordinatedAccess.perform(
+                resources: [], startAccess: { _ in false }, stopAccess: { _ in },
+                coordinate: { (_: (URL) -> Void) in
+                    withUnsafeCurrentTask { $0?.cancel() }
+                    return NSError(domain: "cancelled-coordinator", code: 1)
+                }, operation: { _ in XCTFail("A canceled native wait cannot mutate a file") }
+            )
+        }
+        do { try await task.value; XCTFail("Expected cancellation") }
+        catch { XCTAssertTrue(error is CancellationError) }
+    }
 }

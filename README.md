@@ -191,3 +191,7 @@ drive.observer = controller
 Note that the relative paths passed to the observer are not necessarily new files, 
 but could be files with updates, or even files that were removed. 
 Your code should take these possibilities into account, and adapt appropriately.
+
+## Host execution protection
+
+An iOS host can install `CoordinatedFileExecutionProtection.installDefaultAcquisition` before constructing drives. Each native coordinated read, write, copy and default conflict-resolution scope acquires its own lease synchronously. Denied or expired admission throws before the accessor starts. Expiration cancels its coordinator; task cancellation also cancels asynchronous requests. The lease releases only after native coordination and security-scoped resource cleanup finish. An accessor that already committed retains its successful result. The host must keep its execution assertion until the lease is released, including after requesting interruption. Without an installed policy, ordinary coordination behavior is unchanged.
